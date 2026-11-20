@@ -1,0 +1,11 @@
+{
+  "batch_no": 1,
+  "waypoint_ops": [
+    { "op": "upsert", "id": 9, "x": 3.0, "y": 3.0 },
+    { "op": "upsert", "id": 2, "x": 5.0, "y": 6.0 }
+  ],
+  "road_ops": [
+    { "op": "upsert", "id": 102, "name": "中心纵路(改线)", "point_ids": [6, 9, 2, 7] },
+    { "op": "upsert", "id": 105, "name": "新增支路", "point_ids": [9, 3] }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "batch_no": 2,
+  "waypoint_ops": [
+    { "op": "delete", "id": 8 }
+  ],
+  "road_ops": [
+    { "op": "delete", "id": 103 },
+    { "op": "upsert", "id": 104, "name": "区外小路(改线)", "point_ids": [5, 4] }
+  ]
+}
