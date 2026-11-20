@@ -132,6 +132,12 @@ class MapResponse(BaseModel):
     referenced_waypoints: list[WaypointOut]
 
 
+class MileageResponse(BaseModel):
+    region_id: str
+    batch_no: int = Field(..., description="里程所对应的最新数据批号")
+    total_m: float = Field(..., description="区域内管养里程总米数（米）")
+
+
 class ReceiptResponse(BaseModel):
     batch_no: int
     status: Literal["applied", "replayed"]

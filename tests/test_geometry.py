@@ -6,7 +6,11 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app.geometry import _segments_intersect, polyline_intersects_rect  # noqa: E402
+from app.geometry import (  # noqa: E402
+    _segments_intersect,
+    polyline_intersects_rect,
+    segment_clipped_length,
+)
 
 RECT = (0.0, 0.0, 10.0, 10.0)
 
@@ -56,3 +60,42 @@ def test_bbox_quick_reject():
 
 def test_empty_polyline():
     assert not polyline_intersects_rect([], RECT)
+
+
+# ---- 线段裁剪长度 ---------------------------------------------------------
+
+
+def test_clipped_length_inside_is_full():
+    assert segment_clipped_length((2, 2), (8, 2), RECT) == 6.0
+
+
+def test_clipped_length_crossing_is_partial():
+    assert segment_clipped_length((-10, 5), (30, 5), RECT) == 10.0
+
+
+def test_clipped_length_diagonal():
+    assert segment_clipped_length((-5, -5), (15, 15), RECT) == \
+        10 * 2 ** 0.5
+
+
+def test_clipped_length_along_edge_counts():
+    assert segment_clipped_length((-5, 10), (15, 10), RECT) == 10.0
+    assert segment_clipped_length((10, -5), (10, 15), RECT) == 10.0
+
+
+def test_clipped_length_touching_corner_is_zero():
+    assert segment_clipped_length((-5, 5), (0, 5), RECT) == 0.0
+    assert segment_clipped_length((5, -5), (5, 0), RECT) == 0.0
+
+
+def test_clipped_length_outside_is_zero():
+    assert segment_clipped_length((11, 11), (20, 20), RECT) == 0.0
+    assert segment_clipped_length((-10, 12), (20, 12), RECT) == 0.0
+
+
+def test_clipped_length_degenerate_point():
+    assert segment_clipped_length((5, 5), (5, 5), RECT) == 0.0
+
+
+def test_clipped_length_reverse_direction_equal():
+    assert segment_clipped_length((8, 2), (2, 2), RECT) == 6.0

@@ -1,7 +1,7 @@
 services:
   roadmap-api:
     build: .
-    image: roadmap-region-api:1.0.0
+    image: roadmap-region-api:1.1.0
     container_name: roadmap-region-api
     ports:
       - "8000:8000"

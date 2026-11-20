@@ -1,6 +1,7 @@
-"""平面几何判定：矩形与折线是否相交（含边界接触）。"""
+"""平面几何判定与量算：矩形与折线相交、线段落在矩形内的长度。"""
 from __future__ import annotations
 
+from math import hypot
 from typing import Sequence
 
 Point = tuple[float, float]
@@ -67,3 +68,43 @@ def polyline_intersects_rect(points: Sequence[Point], rect: Rect) -> bool:
             if _segments_intersect(a, b, c, d):
                 return True
     return False
+
+
+def segment_clipped_length(a: Point, b: Point, rect: Rect) -> float:
+    """线段 ab 落在轴对齐矩形内的长度（米）。
+
+    使用 Liang-Barsky 参数裁剪：矩形边界算作矩形内，因此沿边线走
+    的线段全长计入，而仅与边界相切于一点的线段长度为 0。
+    不在矩形内的部分不计。
+    """
+    xmin, ymin, xmax, ymax = rect
+    dx = b[0] - a[0]
+    dy = b[1] - a[1]
+
+    t0, t1 = 0.0, 1.0
+    # (p, q)：p < 0 从边界外进入，p > 0 从边界内离开。
+    for p, q in (
+        (-dx, a[0] - xmin),
+        (dx, xmax - a[0]),
+        (-dy, a[1] - ymin),
+        (dy, ymax - a[1]),
+    ):
+        if p == 0:
+            if q < 0:
+                return 0.0  # 平行于该边界且整条在矩形外
+            continue
+        r = q / p
+        if p < 0:
+            if r > t1:
+                return 0.0
+            if r > t0:
+                t0 = r
+        else:
+            if r < t0:
+                return 0.0
+            if r < t1:
+                t1 = r
+
+    if t1 <= t0:
+        return 0.0
+    return hypot(dx, dy) * (t1 - t0)

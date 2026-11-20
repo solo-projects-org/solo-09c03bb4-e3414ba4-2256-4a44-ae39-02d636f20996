@@ -1,4 +1,4 @@
-"""业务逻辑层：底图导入、连续批号增量更新、区域取图。
+"""业务逻辑层：底图导入、连续批号增量更新、区域取图与里程汇总。
 
 设计要点
 ========
@@ -10,31 +10,42 @@
        按点号反查，不扫描全图。
 * 引用完整性由外键 + 提交前针对“受影响道路集合”的缺失点检查双重保证，
   任一道路缺少引用点则整批拒绝。
-* 区域成员关系（region_road）随每次提交增量重写受影响道路的行，
-  取图在单个只读事务内完成，区域道路/引用路点/批号必然同快照。
+* 区域成员关系（region_road）与里程汇总（segment_measure / region_measure）
+  随每次提交增量重写，取图/查里程在只读事务内完成，与批号严格同快照。
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import sqlite3
-import threading
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from .database import session
+from .database import WRITE_LOCK, session
 from .geometry import polyline_intersects_rect
+from .measure import (
+    MEASURE_VERSION,
+    collect_affected_pairs,
+    ensure_measurements,
+    ensure_ready_committed,
+    rebuild_all,
+    recompute_pairs,
+    road_pairs,
+    stamp_batch,
+    total_for_region,
+)
 from .schemas import (
     BatchRequest,
     ImportRequest,
     MapResponse,
+    MileageResponse,
     ReceiptResponse,
     RoadOut,
     WaypointOut,
 )
 
 # 写操作串行化锁（SQLite 单文件 + WAL，读不阻塞写）。
-_write_lock = threading.Lock()
+_write_lock = WRITE_LOCK
 
 INITIAL_BATCH = 0
 
@@ -181,8 +192,13 @@ def import_base_map(req: ImportRequest, db_path: Optional[str] = None) -> dict[s
                         (road.id, seq, pid),
                     )
 
-            # 首次导入：全量计算一次区域成员。
+            # 首次导入：全量计算一次区域成员与里程汇总。
             _recompute_membership(conn, set(road_ids), INITIAL_BATCH)
+            rebuild_all(conn, INITIAL_BATCH)
+            conn.execute(
+                "INSERT INTO metadata(key, value) VALUES ('measure_version', ?)",
+                (MEASURE_VERSION,),
+            )
 
             conn.execute(
                 "INSERT INTO metadata(key, value) VALUES ('last_batch_no', ?)",
@@ -211,6 +227,8 @@ def reset_storage(db_path: Optional[str] = None) -> None:
     with _write_lock, session(db_path) as conn:
         conn.execute("BEGIN")
         for table in (
+            "segment_measure",
+            "region_measure",
             "region_road",
             "road_point",
             "road",
@@ -342,8 +360,26 @@ def apply_batch(req: BatchRequest, db_path: Optional[str] = None) -> ReceiptResp
             conn, set(road_ops.keys()), set(wp_ops.keys())
         )
 
+        # 仅“坐标确实变化或删除”的点才需要重算其线段长度；
+        # 同坐标 upsert 只更新批号，不产生无效量算。
+        changed_point_ids: set[int] = set()
+        for op in req.waypoint_ops:
+            if op.op == "delete":
+                changed_point_ids.add(op.id)
+                continue
+            row = conn.execute(
+                "SELECT x, y FROM waypoint WHERE id = ?", (op.id,)
+            ).fetchone()
+            if row is None or row["x"] != op.x or row["y"] != op.y:
+                changed_point_ids.add(op.id)
+
         try:
             conn.execute("BEGIN")
+            # 旧库首次写入前先补建汇总（一次全量），之后同事务增量维护。
+            ensure_measurements(conn, last)
+            # 旧拓扑（读取在事务内，与后续写入同一快照）。
+            old_pairs = road_pairs(conn, affected)
+            old_pairs.update(road_pairs(conn, road_ops.keys()))
 
             # ---- 应用路点增删改 ----------------------------------------
             for op in req.waypoint_ops:
@@ -407,6 +443,22 @@ def apply_batch(req: BatchRequest, db_path: Optional[str] = None) -> ReceiptResp
 
             # ---- 增量重判区域成员 --------------------------------------
             regions_changed = _recompute_membership(conn, affected, req.batch_no)
+
+            # ---- 增量重算里程：只碰引用/坐标变化的线段 -------------------
+            new_pairs = road_pairs(conn, affected)
+            new_pairs.update(road_pairs(conn, road_ops.keys()))
+            recompute_pairs(
+                conn,
+                collect_affected_pairs(
+                    old_pairs,
+                    new_pairs,
+                    set(road_ops.keys()),
+                    changed_point_ids,
+                    affected,
+                ),
+                req.batch_no,
+            )
+            stamp_batch(conn, req.batch_no)
 
             receipt = ReceiptResponse(
                 batch_no=req.batch_no,
@@ -507,6 +559,37 @@ def get_map(region_id: str, db_path: Optional[str] = None) -> MapResponse:
         },
         roads=roads,
         referenced_waypoints=waypoints,
+    )
+
+
+def get_mileage(region_id: str, db_path: Optional[str] = None) -> MileageResponse:
+    """读取区域管养里程汇总（直接读总数，不重新量算）。"""
+    with session(db_path) as conn:
+        region = conn.execute(
+            "SELECT id FROM region WHERE id = ?", (region_id,)
+        ).fetchone()
+        if region is None:
+            raise NotFoundError(f"区域不存在: {region_id}")
+        batch_no = _last_batch_no(conn)
+        if batch_no is None:
+            raise ConflictError("尚未导入底图")
+
+    # 旧库可能尚未回填（例如升级后未重启服务）：在独立写事务内补建一次。
+    ensure_ready_committed(db_path)
+
+    with session(db_path) as conn:
+        conn.execute("BEGIN")
+        total = total_for_region(conn, region_id)
+        batch_no = _last_batch_no(conn)
+        conn.commit()
+
+    if total is None:
+        raise NotFoundError(f"区域不存在: {region_id}")
+    assert batch_no is not None
+    return MileageResponse(
+        region_id=region_id,
+        batch_no=batch_no,
+        total_m=total,
     )
 
 

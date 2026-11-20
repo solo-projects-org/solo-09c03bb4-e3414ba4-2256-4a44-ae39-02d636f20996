@@ -7,11 +7,15 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from typing import Iterator
 
 # 允许通过环境变量覆盖数据库文件位置，便于测试与容器挂载。
 DB_PATH = os.environ.get("ROADMAP_DB_PATH", "/data/roadmap.db")
+
+# 进程内写操作串行化锁（SQLite 单文件 + WAL，读不阻塞写）。
+WRITE_LOCK = threading.Lock()
 
 SCHEMA = """
 PRAGMA journal_mode = WAL;
@@ -67,6 +71,28 @@ CREATE TABLE IF NOT EXISTS batch (
     payload_hash  TEXT NOT NULL,
     receipt_json  TEXT NOT NULL,
     applied_at    TEXT NOT NULL
+);
+
+-- 里程增量汇总：每个 (区域, 无向点号对) 一条，值为该线段落在区域内的长度。
+-- 点号对按无向规范化：low_id < high_id，反向引用/同路重复引用天然合并为同一行；
+-- 主键保证多条道路共用同一线段时每区只计一次。
+-- 每次提交只删除并重算“引用或端点坐标变化”的点号对，查询直接读区域总数。
+CREATE TABLE IF NOT EXISTS segment_measure (
+    region_id  TEXT NOT NULL REFERENCES region(id),
+    low_id     INTEGER NOT NULL,
+    high_id    INTEGER NOT NULL,
+    length_m   REAL NOT NULL,
+    batch_no   INTEGER NOT NULL,
+    PRIMARY KEY (region_id, low_id, high_id)
+);
+-- 增量重算按点号对定位（跨区域），因此单独建点号对索引。
+CREATE INDEX IF NOT EXISTS idx_segment_measure_pair
+    ON segment_measure(low_id, high_id);
+
+CREATE TABLE IF NOT EXISTS region_measure (
+    region_id  TEXT PRIMARY KEY REFERENCES region(id),
+    total_m    REAL NOT NULL,
+    batch_no   INTEGER NOT NULL
 );
 """
 

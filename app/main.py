@@ -8,18 +8,21 @@ from fastapi.responses import JSONResponse
 
 from . import __version__
 from .database import DB_PATH, init_db
+from .measure import bootstrap as bootstrap_measurements
 from .schemas import (
     BatchRequest,
     HealthResponse,
     ImportRequest,
     ImportResponse,
     MapResponse,
+    MileageResponse,
     ReceiptResponse,
 )
 from .service import (
     ServiceError,
     apply_batch,
     get_map,
+    get_mileage,
     get_receipt,
     health,
     import_base_map,
@@ -29,6 +32,8 @@ from .service import (
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    # 旧版本 SQLite 底图直接补建里程汇总，无需重新导入。
+    bootstrap_measurements()
     yield
 
 
@@ -43,7 +48,9 @@ app = FastAPI(
         "2. `POST /batches` 按连续批号提交路点/道路增删改，"
         "断档或缺失引用点整批拒绝，同号同内容重送幂等返回原回执；\n"
         "3. `GET /regions/{region_id}/map` 获取与当前批号严格对应的"
-        "区域道路、引用路点（含区外路点）快照。"
+        "区域道路、引用路点（含区外路点）快照；\n"
+        "4. `GET /regions/{region_id}/mileage` 查询区域管养里程"
+        "（区内无向线段的米数总和与对应批号）。"
     ),
 )
 
@@ -105,6 +112,16 @@ def receipt_endpoint(batch_no: int) -> ReceiptResponse:
 )
 def map_endpoint(region_id: str) -> MapResponse:
     return get_map(region_id)
+
+
+@app.get(
+    "/regions/{region_id}/mileage",
+    response_model=MileageResponse,
+    tags=["里程查询"],
+    summary="查询区域管养里程（区内线段总米数与批号）",
+)
+def mileage_endpoint(region_id: str) -> MileageResponse:
+    return get_mileage(region_id)
 
 
 @app.get("/", tags=["运维"], summary="服务信息")
